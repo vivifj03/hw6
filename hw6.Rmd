@@ -1,0 +1,220 @@
+---
+title: "Homework 6: Significantly differentially expressed"
+author: "Viviana Alejandra Rodriguez Romero"
+date: "December 04, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options("scipen"=100, "digits"=4)
+```
+
+<br />  
+
+Identify differentially expressed genes as shown:
+
+```{r message=FALSE, warning=FALSE}
+#source("http://www.bioconductor.org/biocLite.R")
+#biocLite("ALL")
+#biocLite("hgu95av2.db")
+#install.packages("stringi",type="win.binary")
+library(ALL)
+library(limma)
+data(ALL) # Load actual dataset
+pd <- pData(ALL)
+# limma disallows special characters in factor names
+# Convenient wrapper to make names compatible with R internals
+mol.biol <- make.names(pd$mol.biol)
+groups <- factor(mol.biol, levels = unique(mol.biol))
+design <- model.matrix(~0 + groups) # Multifactorial design matrix
+colnames(design) <- levels(groups)
+library(DT)
+datatable(design) # Check your work
+# Define what to compare with what
+contrast <- makeContrasts(BCR.ABLvsNEG = BCR.ABL-NEG, levels=design)
+# Normalize gene expression matrix before differential expression
+M <- normalizeQuantiles(exprs(ALL))
+fit <- lmFit(M, design)
+fit.c <- contrasts.fit(fit, contrast)
+fit.c <- eBayes(fit.c)
+# All results of differential expression analysis
+#tt <- topTable(fit.c, number=Inf, coef = "BCR.ABLvsNEG", adjust.method = "none", p.value = 0.05)
+
+# I changed the code to keep all probes (not only significant ones) and p-values and make easy the testing part
+tt <- topTable(fit.c, number=Inf, coef = "BCR.ABLvsNEG", adjust.method = "none")
+tt$id<-rownames(tt) 
+```   
+
+## Question 1 
+
+Write a function that takes a vector of significantly differentially expressed probes and annotate them by chromosomes they are located on. To do this, you might find the "get" function useful. For example: get(paste("hgu95av2", "CHRLOC", sep="")) returns the CHRLOC map for the hgu95av2 annotation package, assuming it has been loaded already by library().
+
+```{r message=FALSE, warning=FALSE}
+chrom<-function(x){
+  #x is a dataset where id column has the probes ids
+  
+  #Getting the chromosomes
+  library("hgu95av2.db")
+  library ("plyr")
+  chr <- hgu95av2CHR
+  # Get the probe identifiers that are mapped to a chromosome
+  mapped_probes <- mappedkeys(chr)
+  # Convert to a list
+  chr <- as.list(chr[mapped_probes])
+  chr <- ldply (chr, data.frame)
+  colnames(chr)<-c("id", "chromosome")
+  chr<-aggregate(chromosome ~ id, data = chr, FUN = paste, collapse = " ")
+  
+  #Annotating the vector
+  tt2<-merge(x, chr, by="id", all.x=T) 
+  return(tt2)
+}
+
+#This dataset (tt2) has all probes, not only the significant ones
+# but the function would work if we pass through only the significant ones
+tt2<-chrom(tt)
+tt2$sig<-ifelse(tt2$P.Value<0.05,1,0)
+head(tt2)
+```
+
+<p> </p>
+
+
+<br />   
+
+## Question 2
+
+Use Fisher's Exact test to test whether any chromosomes are significantly enriched or depleted for differentially expressed genes.
+
+
+```{r message=FALSE, warning=FALSE}
+chr<-c(seq(1:22),"X", "Y")
+Fisher.test.2<-function(z){
+  df<-tt2
+  v<-paste("\\b",z,"\\b", sep="")
+  df$chr<-ifelse(sapply(tt2$chromosome, function(s) grepl(v, s))==TRUE,
+                 1,ifelse(is.na(tt2$chromosome)==TRUE,NA,0))
+  a<-t(table(df$chr, tt2$sig))
+  p.f<-fisher.test(a)$p.value
+  return(p.f)
+}
+
+chr.pvalue<-sapply(chr, Fisher.test.2)
+chromosomes<-as.data.frame(chr)
+chromosomes$Fisher<-chr.pvalue
+chromosomes[chromosomes$Fisher<0.05,1]
+```
+
+
+<p> </p>
+
+
+According with the Fisher's Exact test, the chromosome 3 is significantly enriched, and chromosomes 17 and Y are significantly depleted for differentially expressed genes.
+
+<br />   
+
+## Question 3  
+
+Correct for Fisher's exact p-values for multiple testing using all methods you know.
+
+```{r message=FALSE, warning=FALSE}
+library(stats)
+chromosomes$Fisher.Bonferroni<-p.adjust(chromosomes$Fisher, method = "bonferroni")
+chromosomes$Fisher.Holm<-p.adjust(chromosomes$Fisher, method = "holm")
+chromosomes$Fisher.BH<-p.adjust(chromosomes$Fisher, method = "BH") 
+chromosomes$Fisher.BY<-p.adjust(chromosomes$Fisher, method = "BY")
+
+chromosomes[chromosomes$Fisher.Bonferroni<0.05,1]
+chromosomes[chromosomes$Fisher.Holm<0.05,1]
+chromosomes[chromosomes$Fisher.BH<0.05,1]
+chromosomes[chromosomes$Fisher.BY<0.05,1]
+```
+
+<p> </p>
+
+When using the adjusted p-values, there is no any significant enriched or depleted chromosome, no matters what correction is used, no even using Benjamini & Hochberg (1995) (BH) nor Benjamini & Yekutieli (BY) that control the FDR. 
+
+<br />  
+
+
+## Question 4 
+
+Repeat the same calculations using hypergeometric test, binomial test, permutation test. You may find this presentation helpful: http://jura.wi.mit.edu/bio/education/hot_topics/enrichment/Gene_list_enrichment_Mar10.pdf. Do not adjust for multiple testing.
+
+<p> </p>
+
+```{r message=FALSE, warning=FALSE}
+enrichment.tests2<-function(z){
+  library(perm)   
+  df<-tt2
+  v<-paste("\\b",z,"\\b", sep="")
+  df$chr<-ifelse(sapply(tt2$chromosome, function(s) grepl(v, s))==TRUE,
+                 1,ifelse(is.na(tt2$chromosome)==TRUE,NA,0))
+  a<-t(table(df$chr, tt2$sig))
+  
+  p.hypergeometric<-phyper(a[4]-1, a[2],  a[1], a[3]+a[4], lower.tail=FALSE)
+ 
+  p.binomial<-binom.test(a[4],a[3]+a[4], p = a[2]/(a[2]+a[1]))$p.value
+  
+  p.permutation<-permTS(df$sig ~ df$chr, alternative="two.sided", exact=TRUE)$p.value
+  
+  p<-rbind(p.hypergeometric, p.binomial)
+  p2<-rbind(p,p.permutation)
+  return(p2)
+}
+
+chr.pvalue2<-t(sapply(chr, enrichment.tests2))
+colnames(chr.pvalue2)<-c("Hypergeometric", "Binomial",  "Permutation")
+chromosomes<-cbind(chromosomes, chr.pvalue2)
+
+chromosomes[chromosomes$Hypergeometric<0.05,1]
+chromosomes[chromosomes$Binomial<0.05,1]
+chromosomes[chromosomes$Permutation<0.05,1]
+```
+
+<p> </p>
+
+
+According to the binomial and permutation tests, the chromosomes 3, 17 and Y are significantly enriched or depleted, getting the same results as with the Fisher's exact test. On the other hand, according to the hypergeometric test, the significantly enriched chromosomes are 2, 3, and 21.   
+
+<br />   
+
+## Question 5 
+
+Summarize the results in one table. Rows are chromosomes, columns are p-values. Column names should similar to "Fisher's exact p-value", "Fisher's exact Bonferroni adjusted", "Fisher's exact FDR adjusted", ". . . ", "hypergeometric p-value", "binomial p-value", "permutation p-value".
+
+<p> </p>
+
+```{r message=FALSE, warning=FALSE}
+library(DT)
+colnames(chromosomes)<- c("Chromosome", "Fisher Exact", "Fisher Exact Bonferroni adjusted",
+                          "Fisher Exact Holm adjusted", "Fisher Exact BH adjusted",
+                          "Fisher Exact BY adjusted", "Hypergeometric", "Binomial", "Permutation")
+datatable(round(chromosomes[,-1],5))  %>% 
+  formatStyle(names(chromosomes[,-1]), backgroundColor = styleInterval(0.05, c('yellow', 'white')))
+```
+
+<br />   
+
+## Question 6
+
+Interpret the differences in raw p-values from different tests.
+
+<p> </p>
+
+
+The raw p-values between Fisher's exact test, binomial test, and permutation test are very close since this three tests are testing a very similar hypothesis, whether a chromosome is enriched or depleted. The small difference between these p-values is given by the replacement or not replacement methodology that those test use. For example, Fisher's test does not use replacement while Binomial test does it. 
+
+On the other hand, the p-values of the hypergeometric test are considerable different as compare with the other three methods, the reason is that in the hypergeometric test the hypothesis is only looking for enriched chromosomes and does not care about the depleted ones, that is why the only chromosome identify for all four test is chromosome 3 that is a enriched chromosome.  
+
+<br />   
+
+## Question 7
+
+Interpret the differences among different methods for adjustment for multiple testing.
+
+<p> </p>
+
+After adjusting for multiple comparisons, all four adjustment methods gave the same conclusion, no significantly enriched or depleted chromosomes. Bonferroni and Holm methods are controlling the FWER while the other two methods control the FDR, then this last two should be more powerful. Amogh all four approaches, the BY was the less conservative method given smallest p-values after correction. 
+
